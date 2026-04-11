@@ -94,20 +94,29 @@ function ourMethodQuestion(context) {
 }
 
 // Home tab
-app.event("app_home_opened", async ({ event, client }) => {
-  try {
-    await client.views.publish({
-      user_id: event.user,
-      view: {
-        type: "home",
+
+// Зберігаємо кого вже привітали щоб не спамити
+const greeted = new Set();
+
+app.event("message", async ({ event, client }) => {
+  if (event.channel_type !== "im") return;
+  if (event.bot_id || event.subtype) return;
+  const userId = event.user;
+  if (!userId) return;
+  if (!greeted.has(userId)) {
+    greeted.add(userId);
+    try {
+      await client.chat.postMessage({
+        channel: event.channel,
         blocks: [
           s("👋 *Привіт! Я допоможу визначити правильний спосіб оплати контрагенту.*\n\nНатисни кнопку нижче — і я крок за кроком підкажу який метод обрати."),
           actions([["💳 Провести оплату", "start_payment", "primary"]]),
         ],
-      },
-    });
-  } catch (e) { console.error("Home error:", e?.data || e); }
+      });
+    } catch (e) { console.error("Greet error:", e?.data || e); }
+  }
 });
+
 
 // Slash command
 app.command("/payment", async ({ command, ack, client }) => {
