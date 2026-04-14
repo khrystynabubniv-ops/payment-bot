@@ -95,6 +95,30 @@ function ourMethodQuestion(context) {
 
 // Home tab
 
+// Home tab — статичний екран з інструкцією
+app.event("app_home_opened", async ({ event, client }) => {
+  try {
+    await client.views.publish({
+      user_id: event.user,
+      view: {
+        type: "home",
+        blocks: [
+          s("💳 *Payment Bot*"),
+          s("Я допоможу визначити правильний спосіб оплати контрагенту — крок за кроком."),
+          { type: "divider" },
+          s("*Як почати:*
+
+1️⃣ Перейди у вкладку *Messages* вище
+2️⃣ Напиши будь-що або використай команду `/payment`
+3️⃣ Відповідай на питання — і я підкажу що робити"),
+          { type: "divider" },
+          s("_Бот доступний для всієї команди Genesis Tech_"),
+        ],
+      },
+    });
+  } catch (e) { console.error("Home error:", e?.data || e); }
+});
+
 // Зберігаємо кого вже привітали щоб не спамити
 const greeted = new Set();
 
