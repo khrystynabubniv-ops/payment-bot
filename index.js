@@ -7,13 +7,17 @@ const app = new App({
   appToken: process.env.SLACK_APP_TOKEN,
 });
 
+// Сесії з sessionId для захисту від старих кнопок
 const sessions = {};
+
 function getSession(userId) {
-  if (!sessions[userId]) sessions[userId] = { step: "home", data: {} };
+  if (!sessions[userId]) sessions[userId] = { step: "home", data: {}, sessionId: Date.now() };
   return sessions[userId];
 }
+
 function resetSession(userId) {
-  sessions[userId] = { step: "home", data: {} };
+  sessions[userId] = { step: "home", data: {}, sessionId: Date.now() };
+  return sessions[userId];
 }
 
 const TITAN_URL = "https://titan.gen.tech/site/login";
@@ -57,10 +61,11 @@ function actions(buttons) {
   };
 }
 function questionMsg(text, buttons) {
-  return { blocks: [s(text), actions(buttons)] };
+  return { text: text.replace(/\*/g, ""), blocks: [s(text), actions(buttons)] };
 }
 function resultMsg(title, details, extra) {
   return {
+    text: title.replace(/\*/g, ""),
     blocks: [
       s(title), divider(), s(details),
       ...(extra ? [divider(), s(extra)] : []),
@@ -81,7 +86,6 @@ const FIRST_QUESTION = questionMsg(
   ]
 );
 
-// Вибір методу з нашого боку для ФОП3/ТОВ
 function ourMethodQuestion(context) {
   return questionMsg(
     `💡 *${context}*\n\nОбери зручний спосіб оплати з нашого боку:`,
@@ -93,29 +97,7 @@ function ourMethodQuestion(context) {
   );
 }
 
-// Home tab
-
-// Home tab — статичний екран з інструкцією
-app.event("app_home_opened", async ({ event, client }) => {
-  try {
-    await client.views.publish({
-      user_id: event.user,
-      view: {
-        type: "home",
-        blocks: [
-          s("💳 *Payment Bot*"),
-          s("Я допоможу визначити правильний спосіб оплати контрагенту — крок за кроком."),
-          { type: "divider" },
-          s("*Як почати:*\n\n1. Перейди у вкладку *Messages* вище\n2. Напиши будь-що або введи команду /payment\n3. Відповідай на питання — і я підкажу що робити"),
-          { type: "divider" },
-          s("_Бот доступний для всієї команди Genesis Tech_"),
-        ],
-      },
-    });
-  } catch (e) { console.error("Home error:", e?.data || e); }
-});
-
-// Зберігаємо кого вже привітали щоб не спамити
+// Привітання при першому повідомленні в DM
 const greeted = new Set();
 
 app.event("message", async ({ event, client }) => {
@@ -128,6 +110,7 @@ app.event("message", async ({ event, client }) => {
     try {
       await client.chat.postMessage({
         channel: event.channel,
+        text: "Привіт! Натисни кнопку щоб почати.",
         blocks: [
           s("👋 *Привіт! Я допоможу визначити правильний спосіб оплати контрагенту.*\n\nНатисни кнопку нижче — і я крок за кроком підкажу який метод обрати."),
           actions([["💳 Провести оплату", "start_payment", "primary"]]),
@@ -137,13 +120,13 @@ app.event("message", async ({ event, client }) => {
   }
 });
 
-
 // Slash command
 app.command("/payment", async ({ command, ack, client }) => {
   await ack();
   const userId = command.user_id;
-  resetSession(userId);
-  getSession(userId).step = "payment_type";
+  const sess = resetSession(userId);
+  sess.step = "payment_type";
+  sess.channelId = command.channel_id;
   await client.chat.postMessage({ channel: command.channel_id, ...FIRST_QUESTION });
 });
 
@@ -156,12 +139,14 @@ app.action(/^btn_/, async ({ action, body, ack, client }) => {
   const value = action.value;
   const label = action.text?.text || value;
 
+  // Приховати кнопки — показати що обрано
   if (ts && channelId && value !== "restart" && value !== "start_payment") {
     try {
       const originalText = body.message?.blocks?.[0]?.text?.text || "";
       await client.chat.update({
         channel: channelId,
         ts,
+        text: originalText,
         blocks: [s(originalText), s(`_Обрано: *${label}*_`)],
       });
     } catch (e) { console.error("Update error:", e?.data || e); }
@@ -174,7 +159,6 @@ async function post(client, channelId, payload) {
   return await client.chat.postMessage({ channel: channelId, ...payload });
 }
 
-// Результат: нерезидент через Titan (картка)
 async function resultNonresidentCard(client, channelId, amount) {
   if (amount === "high") {
     await post(client, channelId, resultMsg(
@@ -189,7 +173,6 @@ async function resultNonresidentCard(client, channelId, amount) {
   }
 }
 
-// Результат: нерезидент через Titan (реквізити)
 async function resultNonresidentRequisites(client, channelId) {
   await post(client, channelId, resultMsg(
     "✅ *Оплата з нерезидента — запит у Titan*",
@@ -199,22 +182,23 @@ async function resultNonresidentRequisites(client, channelId) {
 }
 
 async function handleStep(client, userId, channelId, action) {
-  const session = getSession(userId);
-
+  // Restart завжди скидає сесію
   if (action === "restart") {
-    resetSession(userId);
-    getSession(userId).step = "payment_type";
+    const sess = resetSession(userId);
+    sess.step = "payment_type";
     await post(client, channelId, FIRST_QUESTION);
     return;
   }
 
+  // start_payment завжди скидає сесію
   if (action === "start_payment") {
-    resetSession(userId);
-    getSession(userId).step = "payment_type";
+    const sess = resetSession(userId);
+    sess.step = "payment_type";
     await post(client, channelId || userId, FIRST_QUESTION);
     return;
   }
 
+  const session = getSession(userId);
   const step = session.step;
 
   // ── КРОК 1: що доступно у контрагента ───────────────────────────
@@ -244,6 +228,12 @@ async function handleStep(client, userId, channelId, action) {
       ));
       return;
     }
+
+    // Невідома дія — скидаємо
+    const sess = resetSession(userId);
+    sess.step = "payment_type";
+    await post(client, channelId, FIRST_QUESTION);
+    return;
   }
 
   // ── КРОК 2а: наш метод для картки ───────────────────────────────
@@ -300,7 +290,6 @@ async function handleStep(client, userId, channelId, action) {
   if (step === "contractor") {
     session.data.contractor = action;
 
-    // ФОП 2 — тільки картка фізособи
     if (action === "fop2") {
       await post(client, channelId, resultMsg(
         "✅ *Картка фізособи (грн Mono)*",
@@ -310,17 +299,11 @@ async function handleStep(client, userId, channelId, action) {
       return;
     }
 
-    // ФОП 3 або ТОВ з валютою → вибір нашого методу
-    if (session.data.hasFx === "yes" && ["fop3", "tov"].includes(action)) {
-      session.step = "fop3tov_fx_method";
-      await post(client, channelId, ourMethodQuestion(`Контрагент (${action.toUpperCase()}) має валютний рахунок.`));
-      return;
-    }
-
-    // ФОП 3 або ТОВ лише гривня → вибір нашого методу
-    if (session.data.hasFx === "no" && ["fop3", "tov"].includes(action)) {
-      session.step = "fop3tov_uah_method";
-      await post(client, channelId, ourMethodQuestion(`Контрагент (${action.toUpperCase()}) працює лише в гривні.`));
+    if (["fop3", "tov"].includes(action)) {
+      session.step = session.data.hasFx === "yes" ? "fop3tov_fx_method" : "fop3tov_uah_method";
+      const label = action === "fop3" ? "ФОП 3 група" : "ТОВ (загальна система)";
+      const fxLabel = session.data.hasFx === "yes" ? "має валютний рахунок" : "працює лише в гривні";
+      await post(client, channelId, ourMethodQuestion(`Контрагент (${label}) ${fxLabel}.`));
       return;
     }
   }
@@ -442,9 +425,19 @@ async function handleStep(client, userId, channelId, action) {
     resetSession(userId);
     return;
   }
+
+  // Якщо крок невідомий — скидаємо і починаємо знову
+  const sess = resetSession(userId);
+  sess.step = "payment_type";
+  await post(client, channelId, FIRST_QUESTION);
 }
 
 (async () => {
   await app.start();
-  console.log("⚡️ Payment bot v5 is running!");
+  console.log("⚡️ Payment bot v6 is running!");
+
+  // Keep-alive
+  setInterval(() => {
+    console.log("[keep-alive] ping", new Date().toISOString());
+  }, 5 * 60 * 1000);
 })();
