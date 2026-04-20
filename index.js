@@ -20,6 +20,17 @@ function resetSession(userId) {
   return sessions[userId];
 }
 
+// Дедуплікація: зберігаємо оброблені action events { "userId_actionTs" -> timestamp }
+const processedActions = new Map();
+
+// Очищення старих записів кожні 10 хвилин (видаляємо старші 5 хвилин)
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [key, ts] of processedActions.entries()) {
+    if (ts < cutoff) processedActions.delete(key);
+  }
+}, 10 * 60 * 1000);
+
 const TITAN_URL = "https://titan.gen.tech/site/login";
 const TITAN_NOTION = "https://www.notion.so/Paidlog-Titan-6132cf4d98ae4a33a8dd3f85ad849d85";
 const CARDS_NOTION = "https://www.notion.so/18bce9899cb78129a33bfaa08c75a1fb";
@@ -97,6 +108,13 @@ function ourMethodQuestion(context) {
   );
 }
 
+// Відкрити DM якщо channelId невідомий (наприклад, клік з App Home)
+async function resolveChannel(client, userId, channelId) {
+  if (channelId) return channelId;
+  const result = await client.conversations.open({ users: userId });
+  return result.channel.id;
+}
+
 // Привітання при першому повідомленні в DM
 const greeted = new Set();
 
@@ -120,6 +138,23 @@ app.event("message", async ({ event, client }) => {
   }
 });
 
+// Home Tab — публікуємо View при відкритті
+app.event("app_home_opened", async ({ event, client }) => {
+  const userId = event.user;
+  try {
+    await client.views.publish({
+      user_id: userId,
+      view: {
+        type: "home",
+        blocks: [
+          s("👋 *Привіт! Я допоможу визначити правильний спосіб оплати контрагенту.*\n\nНатисни кнопку нижче — і я крок за кроком підкажу який метод обрати."),
+          actions([["💳 Провести оплату", "start_payment", "primary"]]),
+        ],
+      },
+    });
+  } catch (e) { console.error("Home tab error:", e?.data || e); }
+});
+
 // Slash command
 app.command("/payment", async ({ command, ack, client }) => {
   await ack();
@@ -134,17 +169,33 @@ app.command("/payment", async ({ command, ack, client }) => {
 app.action(/^btn_/, async ({ action, body, ack, client }) => {
   await ack();
   const userId = body.user.id;
-  const channelId = body.channel?.id;
+  const actionTs = action.action_ts;
+
+  // Дедуплікація: ігнорувати повторні deliveries одного й того ж action
+  const dedupKey = `${userId}_${actionTs}`;
+  if (processedActions.has(dedupKey)) return;
+  processedActions.set(dedupKey, Date.now());
+
+  const rawChannelId = body.channel?.id;
   const ts = body.message?.ts;
   const value = action.value;
   const label = action.text?.text || value;
 
+  // Отримати або відкрити DM канал
+  let channelId;
+  try {
+    channelId = await resolveChannel(client, userId, rawChannelId);
+  } catch (e) {
+    console.error("resolveChannel error:", e?.data || e);
+    return;
+  }
+
   // Приховати кнопки — показати що обрано
-  if (ts && channelId && value !== "restart" && value !== "start_payment") {
+  if (ts && rawChannelId && value !== "restart" && value !== "start_payment") {
     try {
       const originalText = body.message?.blocks?.[0]?.text?.text || "";
       await client.chat.update({
-        channel: channelId,
+        channel: rawChannelId,
         ts,
         text: originalText,
         blocks: [s(originalText), s(`_Обрано: *${label}*_`)],
@@ -182,7 +233,6 @@ async function resultNonresidentRequisites(client, channelId) {
 }
 
 async function handleStep(client, userId, channelId, action) {
-  // Restart завжди скидає сесію
   if (action === "restart") {
     const sess = resetSession(userId);
     sess.step = "payment_type";
@@ -190,18 +240,16 @@ async function handleStep(client, userId, channelId, action) {
     return;
   }
 
-  // start_payment завжди скидає сесію
   if (action === "start_payment") {
     const sess = resetSession(userId);
     sess.step = "payment_type";
-    await post(client, channelId || userId, FIRST_QUESTION);
+    await post(client, channelId, FIRST_QUESTION);
     return;
   }
 
   const session = getSession(userId);
   const step = session.step;
 
-  // ── КРОК 1: що доступно у контрагента ───────────────────────────
   if (step === "payment_type") {
     session.data.paymentType = action;
 
@@ -229,14 +277,12 @@ async function handleStep(client, userId, channelId, action) {
       return;
     }
 
-    // Невідома дія — скидаємо
     const sess = resetSession(userId);
     sess.step = "payment_type";
     await post(client, channelId, FIRST_QUESTION);
     return;
   }
 
-  // ── КРОК 2а: наш метод для картки ───────────────────────────────
   if (step === "card_our_method") {
     if (action === "method_nonresident") {
       session.step = "card_nonresident_amount";
@@ -264,14 +310,12 @@ async function handleStep(client, userId, channelId, action) {
     }
   }
 
-  // ── КРОК 2б: сума (нерезидент → картка) ─────────────────────────
   if (step === "card_nonresident_amount") {
     await resultNonresidentCard(client, channelId, action);
     resetSession(userId);
     return;
   }
 
-  // ── КРОК 3: валютний рахунок? ────────────────────────────────────
   if (step === "has_fx") {
     session.data.hasFx = action;
     session.step = "contractor";
@@ -286,7 +330,6 @@ async function handleStep(client, userId, channelId, action) {
     return;
   }
 
-  // ── КРОК 4: тип контрагента ──────────────────────────────────────
   if (step === "contractor") {
     session.data.contractor = action;
 
@@ -308,7 +351,6 @@ async function handleStep(client, userId, channelId, action) {
     }
   }
 
-  // ── КРОК 5а: метод для ФОП3/ТОВ з валютою ───────────────────────
   if (step === "fop3tov_fx_method") {
     if (action === "method_nonresident") {
       session.step = "service_type";
@@ -339,7 +381,6 @@ async function handleStep(client, userId, channelId, action) {
     }
   }
 
-  // ── КРОК 5б: метод для ФОП3/ТОВ лише гривня ─────────────────────
   if (step === "fop3tov_uah_method") {
     if (action === "method_nonresident") {
       session.step = "service_type";
@@ -368,17 +409,8 @@ async function handleStep(client, userId, channelId, action) {
       resetSession(userId);
       return;
     }
-    if (action === "method_tov") {
-      session.step = "kved_check";
-      await post(client, channelId, questionMsg(
-        "📋 *Чи підпадає послуга під один із КВЕД?*\n\nНаші ТОВ можуть оплачувати лише ці типи послуг:\n• Дизайн\n• Реклама\n• Консультації з бізнесу або IT\n• Оренда локації (конференції, зустрічі)\n• Оренда техніки / обладнання для офісу\n\nОбери варіант який найбільше підходить:",
-        [["✅ Так, підпадає", "kved_yes"], ["❌ Ні, не підпадає", "kved_no"]]
-      ));
-      return;
-    }
   }
 
-  // ── КРОК 6: тип послуги (нерезидент) ────────────────────────────
   if (step === "service_type") {
     if (action === "neutral") {
       await resultNonresidentRequisites(client, channelId);
@@ -395,7 +427,6 @@ async function handleStep(client, userId, channelId, action) {
     }
   }
 
-  // ── КРОК 7: нейтральний опис? ────────────────────────────────────
   if (step === "can_describe_neutral") {
     if (action === "yes") {
       await resultNonresidentRequisites(client, channelId);
@@ -409,7 +440,6 @@ async function handleStep(client, userId, channelId, action) {
     return;
   }
 
-  // ── КРОК 8: КВЕД ─────────────────────────────────────────────────
   if (step === "kved_check") {
     if (action === "kved_yes") {
       await post(client, channelId, resultMsg(
@@ -426,7 +456,6 @@ async function handleStep(client, userId, channelId, action) {
     return;
   }
 
-  // Якщо крок невідомий — скидаємо і починаємо знову
   const sess = resetSession(userId);
   sess.step = "payment_type";
   await post(client, channelId, FIRST_QUESTION);
@@ -434,9 +463,8 @@ async function handleStep(client, userId, channelId, action) {
 
 (async () => {
   await app.start();
-  console.log("⚡️ Payment bot v6 is running!");
+  console.log("⚡️ Payment bot v7 is running!");
 
-  // Keep-alive
   setInterval(() => {
     console.log("[keep-alive] ping", new Date().toISOString());
   }, 5 * 60 * 1000);
