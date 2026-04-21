@@ -147,12 +147,63 @@ app.event("app_home_opened", async ({ event, client }) => {
       view: {
         type: "home",
         blocks: [
-          s("👋 *Привіт! Я допоможу визначити правильний спосіб оплати контрагенту.*\n\nНатисни кнопку нижче — і я крок за кроком підкажу який метод обрати."),
-          actions([["💳 Провести оплату", "start_payment", "primary"]]),
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "*💳 Payment Bot*\nДопомагає визначити правильний спосіб оплати контрагенту.",
+            },
+          },
+          { type: "divider" },
+          {
+            type: "section",
+            text: { type: "mrkdwn", text: "*Як це працює:*" },
+          },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "1️⃣ Натисни *Провести оплату* або введи `/payment` в будь-якому каналі\n2️⃣ Обери спосіб, доступний у контрагента — картка, термінал, посилання або реквізити\n3️⃣ Бот крок за кроком підкаже що саме робити",
+            },
+          },
+          { type: "divider" },
+          {
+            type: "section",
+            text: { type: "mrkdwn", text: "*Доступні методи оплати:*\n🌍 Нерезидент через Titan (USD/EUR)\n💼 Корпоративна картка (прямий переказ)\n📱 Картка фізособи Mono (через ФОП)" },
+          },
+          { type: "divider" },
+          {
+            type: "actions",
+            elements: [
+              {
+                type: "button",
+                text: { type: "plain_text", text: "💳 Провести оплату", emoji: true },
+                value: "start_payment",
+                action_id: "btn_start_payment",
+                style: "primary",
+              },
+              {
+                type: "button",
+                text: { type: "plain_text", text: "📖 Інструкція Titan", emoji: true },
+                value: "open_titan",
+                action_id: "btn_open_titan",
+                url: "https://www.notion.so/Paidlog-Titan-6132cf4d98ae4a33a8dd3f85ad849d85",
+              },
+              {
+                type: "button",
+                text: { type: "plain_text", text: "💳 Реквізити карток", emoji: true },
+                value: "open_cards",
+                action_id: "btn_open_cards",
+                url: "https://www.notion.so/18bce9899cb78129a33bfaa08c75a1fb",
+              },
+            ],
+          },
         ],
       },
     });
-  } catch (e) { console.error("Home tab error:", e?.data || e); }
+  } catch (e) {
+    console.error("Home tab error:", e?.data || e);
+  }
 });
 
 // Slash command
