@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@slack/bolt": "^3.17.0"
+    "@slack/bolt": "^4.7.1"
   },
   "engines": {
     "node": ">=18"
